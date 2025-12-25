@@ -13,6 +13,13 @@ export enum AppState {
   REBUILDING = 'REBUILDING'
 }
 
+export enum AppMode {
+  VIEW = 'VIEW',
+  BUILD = 'BUILD'
+}
+
+export type BuildTool = 'pencil' | 'eraser' | 'picker';
+
 export interface VoxelData {
   x: number;
   y: number;

@@ -6,12 +6,15 @@
 
 
 import React, { useState, useEffect, useRef } from 'react';
-import { AppState, SavedModel, VoxelData, GroundingSource } from '../types';
-import { Box, Bird, Cat, Rabbit, Users, Code2, Wand2, Hammer, FolderOpen, ChevronUp, FileJson, History, Play, Pause, Info, Wrench, Loader2, ExternalLink, Search } from 'lucide-react';
+import { AppState, AppMode, SavedModel, BuildTool, GroundingSource } from '../types';
+import { Box, Bird, Cat, Rabbit, Users, Code2, Wand2, Hammer, FolderOpen, ChevronUp, FileJson, History, Play, Pause, Info, Wrench, Loader2, ExternalLink, Search, MousePointer2, Pencil, Eraser, Pipette, Palette } from 'lucide-react';
 
 interface UIOverlayProps {
   voxelCount: number;
   appState: AppState;
+  appMode: AppMode;
+  buildTool: BuildTool;
+  selectedColor: number;
   currentBaseModel: string;
   customBuilds: SavedModel[];
   customRebuilds: SavedModel[];
@@ -29,7 +32,11 @@ interface UIOverlayProps {
   onShowJson: () => void;
   onImportJson: () => void;
   onToggleRotation: () => void;
+  // Fix: Removed duplicate onToggleInfo identifier
   onToggleInfo: () => void;
+  onToggleMode: () => void;
+  onSetTool: (tool: BuildTool) => void;
+  onSetColor: (color: number) => void;
 }
 
 const LOADING_MESSAGES = [
@@ -41,9 +48,31 @@ const LOADING_MESSAGES = [
     "Applying polish..."
 ];
 
+const PRESET_COLORS = [
+    { name: 'Classic Blue', hex: 0x3b82f6 },
+    { name: 'Ruby Red', hex: 0xef4444 },
+    { name: 'Emerald', hex: 0x10b981 },
+    { name: 'Sunshine', hex: 0xf59e0b },
+    { name: 'Purple Dream', hex: 0x8b5cf6 },
+    { name: 'Candy Pink', hex: 0xf472b6 },
+    { name: 'Aqua', hex: 0x22d3ee },
+    { name: 'Lime', hex: 0xa3e635 },
+    { name: 'Tangerine', hex: 0xf97316 },
+    { name: 'Deep Rose', hex: 0xbe123c },
+    { name: 'Teal', hex: 0x0d9488 },
+    { name: 'Sand', hex: 0xfde68a },
+    { name: 'Bark', hex: 0x451a03 },
+    { name: 'Midnight', hex: 0x1e293b },
+    { name: 'Slate', hex: 0x64748b },
+    { name: 'Cloud', hex: 0xf8fafc },
+];
+
 export const UIOverlay: React.FC<UIOverlayProps> = ({
   voxelCount,
   appState,
+  appMode,
+  buildTool,
+  selectedColor,
   currentBaseModel,
   customBuilds,
   customRebuilds,
@@ -61,11 +90,15 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({
   onShowJson,
   onImportJson,
   onToggleRotation,
-  onToggleInfo
+  // Fix: Removed duplicate onToggleInfo identifier in destructuring
+  onToggleInfo,
+  onToggleMode,
+  onSetTool,
+  onSetColor
 }) => {
   const isStable = appState === AppState.STABLE;
   const isDismantling = appState === AppState.DISMANTLING;
-  const isRebuilding = appState === AppState.REBUILDING;
+  const isBuildMode = appMode === AppMode.BUILD;
   
   const [loadingMsgIndex, setLoadingMsgIndex] = useState(0);
 
@@ -75,8 +108,6 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({
             setLoadingMsgIndex((prev) => (prev + 1) % LOADING_MESSAGES.length);
         }, 2000);
         return () => clearInterval(interval);
-    } else {
-        setLoadingMsgIndex(0);
     }
   }, [isGenerating]);
   
@@ -94,11 +125,11 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({
                 icon={<FolderOpen size={20} />}
                 label="Builds"
                 color="indigo"
-                title="Manage your voxel models and creations"
+                title="Open the Builds menu to see presets, your saved models, or generate a new one using AI!"
             >
                 <div className="px-2 py-1 text-xs font-bold text-slate-400 uppercase tracking-wider">NEW BUILDS</div>
-                <DropdownItem onClick={() => onNewScene('Eagle')} icon={<Bird size={16}/>} label="Eagle" title="Load the classic Eagle preset" />
-                <DropdownItem onClick={onPromptCreate} icon={<Wand2 size={16}/>} label="New build" title="Generate a brand new model with AI" highlight />
+                <DropdownItem onClick={() => onNewScene('Eagle')} icon={<Bird size={16}/>} label="Eagle" title="Reset the scene with the classic Eagle preset model." />
+                <DropdownItem onClick={onPromptCreate} icon={<Wand2 size={16}/>} label="New build" title="Ask Gemini AI to create a completely new voxel model from your text description!" highlight />
                 <div className="h-px bg-slate-100 my-1" />
                 
                 {customBuilds.length > 0 && (
@@ -110,7 +141,7 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({
                                 onClick={() => onSelectCustomBuild(model)} 
                                 icon={<History size={16}/>} 
                                 label={model.name} 
-                                title={`Load your creation: ${model.name}`}
+                                title={`Load your previous creation: "${model.name}".`}
                                 truncate
                             />
                         ))}
@@ -118,12 +149,12 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({
                     </>
                 )}
 
-                <DropdownItem onClick={onImportJson} icon={<FileJson size={16}/>} label="Import JSON" title="Import a model from a JSON string" />
+                <DropdownItem onClick={onImportJson} icon={<FileJson size={16}/>} label="Import JSON" title="Paste a JSON blueprint to load a shared voxel model." />
             </DropdownMenu>
 
             <div 
               className="flex items-center gap-3 px-4 py-2 bg-white/90 backdrop-blur-sm shadow-sm rounded-xl border border-slate-200 text-slate-500 font-bold w-fit mt-2"
-              title={`The scene currently contains ${voxelCount} individual voxels`}
+              title={`This counter shows that your scene currently has ${voxelCount} individual blocks.`}
             >
                 <div className="bg-blue-100 p-1.5 rounded-lg text-blue-600">
                     <Box size={16} strokeWidth={3} />
@@ -138,19 +169,18 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({
         {/* Utilities */}
         <div className="pointer-events-auto flex gap-2">
             <TactileButton
-                onClick={onToggleInfo}
-                color={isInfoVisible ? 'indigo' : 'slate'}
-                icon={<Info size={18} strokeWidth={2.5} />}
-                label="Info"
-                title={isInfoVisible ? "Hide information panel" : "Show information panel"}
-                compact
+                onClick={onToggleMode}
+                color={isBuildMode ? 'emerald' : 'sky'}
+                icon={isBuildMode ? <MousePointer2 size={18} strokeWidth={2.5} /> : <Palette size={18} strokeWidth={2.5} />}
+                label={isBuildMode ? "View Mode" : "Build Mode"}
+                title={isBuildMode ? "Switch to View Mode: Rotates camera and lets you play with physics!" : "Switch to Build Mode: Allows you to place, erase, and pick blocks!"}
             />
             <TactileButton
                 onClick={onToggleRotation}
                 color={isAutoRotate ? 'sky' : 'slate'}
                 icon={isAutoRotate ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
-                label={isAutoRotate ? "Pause Cam" : "Play Cam"}
-                title={isAutoRotate ? "Pause camera auto-rotation" : "Resume camera auto-rotation"}
+                label=""
+                title={isAutoRotate ? "Stop the camera from automatically spinning around your model." : "Make the camera spin slowly around your creation."}
                 compact
             />
             <TactileButton
@@ -158,10 +188,75 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({
                 color="slate"
                 icon={<Code2 size={18} strokeWidth={2.5} />}
                 label="Share"
-                title="View model data and share with others"
+                title="Get the JSON blueprint for your current model to save or share with friends!"
+            />
+            <TactileButton
+                onClick={onToggleInfo}
+                color={isInfoVisible ? 'indigo' : 'slate'}
+                icon={<Info size={18} strokeWidth={2.5} />}
+                label=""
+                title={isInfoVisible ? "Hide the welcome message and instructions." : "Show the welcome message and helpful information about the app."}
+                compact
             />
         </div>
       </div>
+
+      {/* --- Build Mode Toolbox --- */}
+      {isBuildMode && (
+          <div className="absolute top-1/2 left-4 -translate-y-1/2 flex flex-col gap-4 pointer-events-auto animate-in slide-in-from-left-10 duration-500">
+              {/* Tool Selection */}
+              <div className="bg-white/90 backdrop-blur-md p-2 rounded-2xl border border-slate-200 shadow-xl flex flex-col gap-2">
+                  <ToolIcon 
+                    active={buildTool === 'pencil'} 
+                    onClick={() => onSetTool('pencil')} 
+                    icon={<Pencil size={20} />} 
+                    label="Place" 
+                    color="blue"
+                    title="Pencil Tool: Click on an existing block to snap a new block to that side."
+                  />
+                  <ToolIcon 
+                    active={buildTool === 'eraser'} 
+                    onClick={() => onSetTool('eraser')} 
+                    icon={<Eraser size={20} />} 
+                    label="Erase" 
+                    color="rose"
+                    title="Eraser Tool: Click on any block to remove it from your sculpture."
+                  />
+                  <ToolIcon 
+                    active={buildTool === 'picker'} 
+                    onClick={() => onSetTool('picker')} 
+                    icon={<Pipette size={20} />} 
+                    label="Pick" 
+                    color="emerald"
+                    title="Color Picker Tool: Click on a block to select its color for your next placement!"
+                  />
+              </div>
+
+              {/* Color Palette */}
+              <div className="bg-white/90 backdrop-blur-md p-3 rounded-2xl border border-slate-200 shadow-xl flex flex-col gap-3 min-w-[140px]" title="Choose a color for your next block!">
+                  <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Palette</div>
+                  <div className="grid grid-cols-4 gap-2">
+                      {PRESET_COLORS.map(c => (
+                          <button
+                            key={c.hex}
+                            onClick={() => onSetColor(c.hex)}
+                            title={`Select color: ${c.name}`}
+                            className={`w-6 h-6 rounded border transition-transform hover:scale-110 active:scale-95 ${selectedColor === c.hex ? 'border-indigo-500 ring-2 ring-indigo-200 scale-110 shadow-sm' : 'border-black/5'}`}
+                            style={{ backgroundColor: `#${c.hex.toString(16).padStart(6, '0')}` }}
+                          />
+                      ))}
+                  </div>
+                  <div className="h-px bg-slate-100" />
+                  <input 
+                    type="color" 
+                    value={`#${selectedColor.toString(16).padStart(6, '0')}`}
+                    onChange={(e) => onSetColor(parseInt(e.target.value.substring(1), 16))}
+                    className="w-full h-8 cursor-pointer rounded-lg bg-transparent p-0 border-0"
+                    title="Click here to choose a custom color using the advanced color picker!"
+                  />
+              </div>
+          </div>
+      )}
 
       {/* --- Grounding Sources Sidebar --- */}
       {groundingSources.length > 0 && !isGenerating && (
@@ -179,7 +274,7 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({
                               target="_blank" 
                               rel="noopener noreferrer"
                               className="flex items-start gap-2 p-2 rounded-lg hover:bg-slate-100 transition-colors group"
-                              title={`Source: ${source.title}\nURL: ${source.uri}`}
+                              title={`View original source used for inspiration: ${source.title}\nURL: ${source.uri}`}
                           >
                               <div className="p-1 rounded bg-slate-200 text-slate-500 group-hover:bg-blue-100 group-hover:text-blue-600 transition-colors">
                                   <ExternalLink size={10} />
@@ -215,21 +310,21 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({
         
         <div className="pointer-events-auto transition-all duration-500 ease-in-out transform">
             
-            {/* STATE 1: STABLE -> DISMANTLE */}
-            {isStable && !isGenerating && (
+            {/* STATE 1: VIEW MODE + STABLE -> BREAK BUTTON */}
+            {!isBuildMode && isStable && !isGenerating && (
                  <div className="animate-in slide-in-from-bottom-10 fade-in duration-300">
                      <BigActionButton 
                         onClick={onDismantle} 
                         icon={<Hammer size={32} strokeWidth={2.5} />} 
                         label="BREAK" 
                         color="rose" 
-                        title="Dismantle the current model into physical pieces"
+                        title="BREAK IT! Click to smash the current model into pieces with realistic physics!"
                      />
                  </div>
             )}
 
-            {/* STATE 2: DISMANTLED -> REBUILD */}
-            {isDismantling && !isGenerating && (
+            {/* STATE 2: VIEW MODE + DISMANTLED -> REBUILD BUTTON */}
+            {!isBuildMode && isDismantling && !isGenerating && (
                 <div className="flex items-end gap-4 animate-in slide-in-from-bottom-10 fade-in duration-300">
                      <DropdownMenu 
                         icon={<Wrench size={24} />}
@@ -237,21 +332,19 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({
                         color="emerald"
                         direction="up"
                         big
-                        title="Reassemble the voxels into a new shape"
+                        title="REBUILD IT! Click to choose a new shape and watch the pieces fly together!"
                      >
                         <div className="px-2 py-1 text-xs font-bold text-slate-400 uppercase tracking-wider">REBUILD</div>
                         
-                        {/* Standard Presets - Only for Eagle */}
                         {isEagle && (
                             <>
-                                <DropdownItem onClick={() => onRebuild('Cat')} icon={<Cat size={18}/>} label="Cat" title="Rebuild these blocks into a cat" />
-                                <DropdownItem onClick={() => onRebuild('Rabbit')} icon={<Rabbit size={18}/>} label="Rabbit" title="Rebuild these blocks into a rabbit" />
-                                <DropdownItem onClick={() => onRebuild('Twins')} icon={<Users size={18}/>} label="Eagles x2" title="Split blocks into two smaller eagles" />
+                                <DropdownItem onClick={() => onRebuild('Cat')} icon={<Cat size={18}/>} label="Cat" title="Reassemble all these blocks into a sitting cat model." />
+                                <DropdownItem onClick={() => onRebuild('Rabbit')} icon={<Rabbit size={18}/>} label="Rabbit" title="Reassemble all these blocks into a cute rabbit model." />
+                                <DropdownItem onClick={() => onRebuild('Twins')} icon={<Users size={18}/>} label="Eagles x2" title="Split the blocks and build two smaller eagles at the same time!" />
                                 <div className="h-px bg-slate-100 my-1" />
                             </>
                         )}
 
-                        {/* Custom Rebuilds */}
                         {customRebuilds.length > 0 && (
                             <>
                                 <div className="px-2 py-1 text-xs font-bold text-slate-400 uppercase tracking-wider">CUSTOM REBUILDS</div>
@@ -261,7 +354,7 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({
                                         onClick={() => onSelectCustomRebuild(model)} 
                                         icon={<History size={18}/>} 
                                         label={model.name}
-                                        title={`Rebuild into your previous creation: ${model.name}`}
+                                        title={`Reassemble the blocks into your previous creation: "${model.name}".`}
                                         truncate 
                                     />
                                 ))}
@@ -269,8 +362,15 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({
                             </>
                         )}
 
-                        <DropdownItem onClick={onPromptMorph} icon={<Wand2 size={18}/>} label="New rebuild" title="Ask AI to rebuild blocks into anything you imagine" highlight />
+                        <DropdownItem onClick={onPromptMorph} icon={<Wand2 size={18}/>} label="New rebuild" title="Use AI Magic to turn these exact same blocks into anything you can imagine!" highlight />
                      </DropdownMenu>
+                </div>
+            )}
+
+            {/* STATE 3: BUILD MODE TIP */}
+            {isBuildMode && (
+                <div className="bg-white/80 backdrop-blur-sm px-6 py-3 rounded-full border border-slate-200 shadow-lg text-slate-600 font-bold text-sm animate-in slide-in-from-bottom-5 duration-300" title="You are now the architect! Use the tools on the left to build your masterpiece.">
+                    <span className="text-emerald-500 mr-2">Build Mode Active:</span> Click to place or remove blocks!
                 </div>
             )}
         </div>
@@ -280,7 +380,26 @@ export const UIOverlay: React.FC<UIOverlayProps> = ({
   );
 };
 
-// --- Components ---
+// --- Sub-Components ---
+
+const ToolIcon: React.FC<{active: boolean, onClick: () => void, icon: React.ReactNode, label: string, color: 'blue' | 'rose' | 'emerald', title?: string}> = ({ active, onClick, icon, label, color, title }) => {
+    const colors = {
+        blue: active ? 'bg-blue-500 text-white shadow-blue-200' : 'text-slate-400 hover:bg-blue-50 hover:text-blue-500',
+        rose: active ? 'bg-rose-500 text-white shadow-rose-200' : 'text-slate-400 hover:bg-rose-50 hover:text-rose-500',
+        emerald: active ? 'bg-emerald-500 text-white shadow-emerald-200' : 'text-slate-400 hover:bg-emerald-50 hover:text-emerald-500'
+    };
+
+    return (
+        <button 
+            onClick={onClick}
+            title={title}
+            className={`flex flex-col items-center justify-center w-14 h-14 rounded-xl transition-all ${colors[color]} ${active ? 'scale-110 shadow-lg' : 'scale-100'}`}
+        >
+            {icon}
+            <span className="text-[9px] font-black uppercase mt-1 tracking-tighter">{label}</span>
+        </button>
+    );
+};
 
 interface TactileButtonProps {
   onClick: () => void;
@@ -317,7 +436,7 @@ const TactileButton: React.FC<TactileButtonProps> = ({ onClick, disabled, icon, 
       `}
     >
       {icon}
-      {!compact && <span>{label}</span>}
+      {label && <span>{label}</span>}
     </button>
   );
 };
@@ -334,8 +453,6 @@ const BigActionButton: React.FC<{onClick: () => void, icon: React.ReactNode, lab
         </button>
     )
 }
-
-// --- Dropdown Components ---
 
 interface DropdownProps {
     icon: React.ReactNode;

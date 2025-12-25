@@ -12,7 +12,7 @@ import { JsonModal } from './components/JsonModal';
 import { PromptModal } from './components/PromptModal';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { Generators } from './utils/voxelGenerators';
-import { AppState, VoxelData, SavedModel, GroundingSource } from './types';
+import { AppState, AppMode, VoxelData, SavedModel, GroundingSource, BuildTool } from './types';
 import { GoogleGenAI, Type } from "@google/genai";
 
 const App: React.FC = () => {
@@ -20,8 +20,11 @@ const App: React.FC = () => {
   const engineRef = useRef<VoxelEngine | null>(null);
   
   const [appState, setAppState] = useState<AppState>(AppState.STABLE);
+  const [appMode, setAppMode] = useState<AppMode>(AppMode.VIEW);
+  const [buildTool, setBuildTool] = useState<BuildTool>('pencil');
+  const [selectedColor, setSelectedColor] = useState<number>(0x3b82f6); // Default Blue
+
   const [voxelCount, setVoxelCount] = useState<number>(0);
-  
   const [isJsonModalOpen, setIsJsonModalOpen] = useState(false);
   const [jsonModalMode, setJsonModalMode] = useState<'view' | 'import'>('view');
   
@@ -47,7 +50,8 @@ const App: React.FC = () => {
     const engine = new VoxelEngine(
       containerRef.current,
       (newState) => setAppState(newState),
-      (count) => setVoxelCount(count)
+      (count) => setVoxelCount(count),
+      (color) => setSelectedColor(color)
     );
 
     engineRef.current = engine;
@@ -68,6 +72,27 @@ const App: React.FC = () => {
     };
   }, []);
 
+  const handleToggleMode = () => {
+      const newMode = appMode === AppMode.VIEW ? AppMode.BUILD : AppMode.VIEW;
+      setAppMode(newMode);
+      engineRef.current?.setMode(newMode);
+      
+      // Auto-pause rotation in Build Mode for convenience
+      if (newMode === AppMode.BUILD && isAutoRotate) {
+          handleToggleRotation();
+      }
+  };
+
+  const handleSetTool = (tool: BuildTool) => {
+      setBuildTool(tool);
+      engineRef.current?.setTool(tool);
+  };
+
+  const handleSetColor = (color: number) => {
+      setSelectedColor(color);
+      engineRef.current?.setBuildColor(color);
+  };
+
   const handleDismantle = () => {
     engineRef.current?.dismantle();
   };
@@ -77,7 +102,7 @@ const App: React.FC = () => {
     if (generator && engineRef.current) {
       engineRef.current.loadInitialModel(generator());
       setCurrentBaseModel('Eagle');
-      setGroundingSources([]); // Reset sources on new preset
+      setGroundingSources([]);
     }
   };
 
@@ -85,7 +110,6 @@ const App: React.FC = () => {
       if (engineRef.current) {
           engineRef.current.loadInitialModel(model.data);
           setCurrentBaseModel(model.name);
-          // Potential optimization: store sources per model. For now just clear.
           setGroundingSources([]);
       }
   };
@@ -165,12 +189,10 @@ const App: React.FC = () => {
   }
 
   const handlePromptSubmit = async (prompt: string) => {
-    if (!process.env.API_KEY) {
-        throw new Error("API Key not found");
-    }
+    if (!process.env.API_KEY) throw new Error("API Key not found");
 
     setIsGenerating(true);
-    setGroundingSources([]); // Clear previous sources
+    setGroundingSources([]);
     setIsPromptModalOpen(false);
 
     try {
@@ -180,35 +202,14 @@ const App: React.FC = () => {
         let systemContext = "";
         if (promptMode === 'morph' && engineRef.current) {
             const availableColors = engineRef.current.getUniqueColors().join(', ');
-            systemContext = `
-                CONTEXT: You are re-assembling an existing pile of lego-like voxels.
-                The current pile consists of these colors: [${availableColors}].
-                TRY TO USE THESE COLORS if they fit the requested shape.
-                If the requested shape absolutely requires different colors, you may use them, but prefer the existing palette to create a "rebuilding" effect.
-                The model should be roughly the same volume as the previous one.
-            `;
+            systemContext = `CONTEXT: Re-assembling existing voxels. Current palette: [${availableColors}]. Prefer these colors. Roughly same volume.`;
         } else {
-            systemContext = `
-                CONTEXT: You are creating a brand new voxel art scene from scratch.
-                Be creative with colors.
-            `;
+            systemContext = `CONTEXT: Creating new voxel art. Be creative with colors.`;
         }
 
         const response = await ai.models.generateContent({
             model,
-            contents: `
-                    ${systemContext}
-                    
-                    Task: Generate a 3D voxel art model of: "${prompt}".
-                    
-                    Strict Rules:
-                    1. Use approximately 150 to 600 voxels.
-                    2. The model must be centered at x=0, z=0.
-                    3. The bottom of the model must be at y=0 or slightly higher.
-                    4. Ensure the structure is physically plausible (connected).
-                    5. Coordinates should be integers.
-                    
-                    Return ONLY a JSON array of objects.`,
+            contents: `${systemContext}\nTask: Generate a 3D voxel art model of: "${prompt}". Return ONLY a JSON array.`,
             config: {
                 tools: [{ googleSearch: {} }],
                 responseMimeType: "application/json",
@@ -220,7 +221,7 @@ const App: React.FC = () => {
                             x: { type: Type.INTEGER },
                             y: { type: Type.INTEGER },
                             z: { type: Type.INTEGER },
-                            color: { type: Type.STRING, description: "Hex color code e.g. #FF5500" }
+                            color: { type: Type.STRING }
                         },
                         required: ["x", "y", "z", "color"]
                     }
@@ -228,32 +229,18 @@ const App: React.FC = () => {
             }
         });
 
-        // Extract Grounding Chunks
         const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
         if (chunks) {
-            const sources: GroundingSource[] = chunks
-                .filter(chunk => chunk.web)
-                .map(chunk => ({
-                    title: chunk.web.title || 'Untitled Source',
-                    uri: chunk.web.uri
-                }));
+            const sources: GroundingSource[] = chunks.filter(c => c.web).map(c => ({ title: c.web.title || 'Source', uri: c.web.uri }));
             setGroundingSources(sources);
         }
 
         if (response.text) {
             const rawData = JSON.parse(response.text);
-            
             const voxelData: VoxelData[] = rawData.map((v: any) => {
                 let colorStr = v.color;
                 if (colorStr.startsWith('#')) colorStr = colorStr.substring(1);
-                const colorInt = parseInt(colorStr, 16);
-                
-                return {
-                    x: v.x,
-                    y: v.y,
-                    z: v.z,
-                    color: isNaN(colorInt) ? 0xCCCCCC : colorInt
-                };
+                return { x: v.x, y: v.y, z: v.z, color: parseInt(colorStr, 16) };
             });
 
             if (engineRef.current) {
@@ -263,35 +250,30 @@ const App: React.FC = () => {
                     setCurrentBaseModel(prompt);
                 } else {
                     engineRef.current.rebuild(voxelData);
-                    setCustomRebuilds(prev => [...prev, { 
-                        name: prompt, 
-                        data: voxelData,
-                        baseModel: currentBaseModel 
-                    }]);
+                    setCustomRebuilds(prev => [...prev, { name: prompt, data: voxelData, baseModel: currentBaseModel }]);
                 }
             }
         }
     } catch (err) {
-        console.error("Generation failed", err);
-        alert("Oops! Something went wrong generating the model.");
+        console.error(err);
+        alert("Generation failed!");
     } finally {
         setIsGenerating(false);
     }
   };
 
-  const relevantRebuilds = customRebuilds.filter(
-      r => r.baseModel === currentBaseModel
-  );
+  const relevantRebuilds = customRebuilds.filter(r => r.baseModel === currentBaseModel);
 
   return (
     <div className="relative w-full h-screen bg-[#f0f2f5] overflow-hidden">
-      {/* 3D Container */}
       <div ref={containerRef} className="absolute inset-0 z-0" />
       
-      {/* UI Overlay */}
       <UIOverlay 
         voxelCount={voxelCount}
         appState={appState}
+        appMode={appMode}
+        buildTool={buildTool}
+        selectedColor={selectedColor}
         currentBaseModel={currentBaseModel}
         customBuilds={customBuilds}
         customRebuilds={relevantRebuilds} 
@@ -310,26 +292,14 @@ const App: React.FC = () => {
         onImportJson={handleImportClick}
         onToggleRotation={handleToggleRotation}
         onToggleInfo={() => setShowWelcome(!showWelcome)}
+        onToggleMode={handleToggleMode}
+        onSetTool={handleSetTool}
+        onSetColor={handleSetColor}
       />
 
-      {/* Modals & Screens */}
-      
       <WelcomeScreen visible={showWelcome} />
-
-      <JsonModal 
-        isOpen={isJsonModalOpen}
-        onClose={() => setIsJsonModalOpen(false)}
-        data={jsonData}
-        isImport={jsonModalMode === 'import'}
-        onImport={handleJsonImport}
-      />
-
-      <PromptModal
-        isOpen={isPromptModalOpen}
-        mode={promptMode}
-        onClose={() => setIsPromptModalOpen(false)}
-        onSubmit={handlePromptSubmit}
-      />
+      <JsonModal isOpen={isJsonModalOpen} onClose={() => setIsJsonModalOpen(false)} data={jsonData} isImport={jsonModalMode === 'import'} onImport={handleJsonImport} />
+      <PromptModal isOpen={isPromptModalOpen} mode={promptMode} onClose={() => setIsPromptModalOpen(false)} onSubmit={handlePromptSubmit} />
     </div>
   );
 };
