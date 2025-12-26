@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 
-
 import React, { useEffect, useRef, useState } from 'react';
 import { VoxelEngine } from './services/VoxelEngine';
 import { UIOverlay } from './components/UIOverlay';
@@ -12,8 +11,10 @@ import { JsonModal } from './components/JsonModal';
 import { PromptModal } from './components/PromptModal';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { Generators } from './utils/voxelGenerators';
-import { AppState, AppMode, VoxelData, SavedModel, GroundingSource, BuildTool } from './types';
+import { AppState, AppMode, VoxelData, SavedModel, GroundingSource, BuildTool, VoxelMaterial } from './types';
 import { GoogleGenAI, Type } from "@google/genai";
+
+const STORAGE_KEY = 'voxel_toybox_saved_models';
 
 const App: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -22,7 +23,8 @@ const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.STABLE);
   const [appMode, setAppMode] = useState<AppMode>(AppMode.VIEW);
   const [buildTool, setBuildTool] = useState<BuildTool>('pencil');
-  const [selectedColor, setSelectedColor] = useState<number>(0x3b82f6); // Default Blue
+  const [selectedColor, setSelectedColor] = useState<number>(0x3b82f6);
+  const [selectedMaterial, setSelectedMaterial] = useState<VoxelMaterial>(VoxelMaterial.MATTE);
 
   const [voxelCount, setVoxelCount] = useState<number>(0);
   const [isJsonModalOpen, setIsJsonModalOpen] = useState(false);
@@ -37,32 +39,85 @@ const App: React.FC = () => {
   const [jsonData, setJsonData] = useState('');
   const [isAutoRotate, setIsAutoRotate] = useState(true);
 
-  // --- State for Custom Models ---
+  // History State
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+
+  // Models state
   const [currentBaseModel, setCurrentBaseModel] = useState<string>('Eagle');
   const [customBuilds, setCustomBuilds] = useState<SavedModel[]>([]);
   const [customRebuilds, setCustomRebuilds] = useState<SavedModel[]>([]);
   const [groundingSources, setGroundingSources] = useState<GroundingSource[]>([]);
 
+  // Load from Storage
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+        try {
+            const { builds, rebuilds } = JSON.parse(saved);
+            setCustomBuilds(builds || []);
+            setCustomRebuilds(rebuilds || []);
+        } catch (e) { console.error("Persistence load error", e); }
+    }
+  }, []);
+
+  // Sync to Storage
+  useEffect(() => {
+    if (customBuilds.length > 0 || customRebuilds.length > 0) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ 
+            builds: customBuilds, 
+            rebuilds: customRebuilds 
+        }));
+    }
+  }, [customBuilds, customRebuilds]);
+
+  // Keybindings
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+        const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+        const cmd = isMac ? e.metaKey : e.ctrlKey;
+
+        if (cmd && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+            e.preventDefault();
+            handleUndo();
+        }
+        if ((cmd && e.shiftKey && e.key.toLowerCase() === 'z') || (cmd && e.key.toLowerCase() === 'y')) {
+            e.preventDefault();
+            handleRedo();
+        }
+        if (e.key.toLowerCase() === 'b' && !e.ctrlKey && !e.metaKey) {
+            handleToggleMode();
+        }
+        if (appMode === AppMode.BUILD) {
+            if (e.key === '1') handleSetTool('pencil');
+            if (e.key === '2') handleSetTool('eraser');
+            if (e.key === '3') handleSetTool('picker');
+        }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [appMode, canUndo, canRedo]);
+
   useEffect(() => {
     if (!containerRef.current) return;
 
-    // Initialize Engine
     const engine = new VoxelEngine(
       containerRef.current,
       (newState) => setAppState(newState),
       (count) => setVoxelCount(count),
-      (color) => setSelectedColor(color)
+      (color, mat) => {
+          setSelectedColor(color);
+          setSelectedMaterial(mat);
+          engineRef.current?.setBuildProps(color, mat);
+      },
+      (u, r) => { setCanUndo(u); setCanRedo(r); }
     );
 
     engineRef.current = engine;
-
-    // Initial Model Load
     engine.loadInitialModel(Generators.Eagle());
 
-    // Resize Listener
     const handleResize = () => engine.handleResize();
     window.addEventListener('resize', handleResize);
-
     const timer = setTimeout(() => setShowWelcome(false), 5000);
 
     return () => {
@@ -76,11 +131,7 @@ const App: React.FC = () => {
       const newMode = appMode === AppMode.VIEW ? AppMode.BUILD : AppMode.VIEW;
       setAppMode(newMode);
       engineRef.current?.setMode(newMode);
-      
-      // Auto-pause rotation in Build Mode for convenience
-      if (newMode === AppMode.BUILD && isAutoRotate) {
-          handleToggleRotation();
-      }
+      if (newMode === AppMode.BUILD && isAutoRotate) handleToggleRotation();
   };
 
   const handleSetTool = (tool: BuildTool) => {
@@ -88,14 +139,19 @@ const App: React.FC = () => {
       engineRef.current?.setTool(tool);
   };
 
-  const handleSetColor = (color: number) => {
-      setSelectedColor(color);
-      engineRef.current?.setBuildColor(color);
+  const handleSetMaterial = (mat: VoxelMaterial) => {
+      setSelectedMaterial(mat);
+      engineRef.current?.setBuildProps(selectedColor, mat);
   };
 
-  const handleDismantle = () => {
-    engineRef.current?.dismantle();
+  const handleSetColor = (color: number) => {
+      setSelectedColor(color);
+      engineRef.current?.setBuildProps(color, selectedMaterial);
   };
+
+  const handleUndo = () => engineRef.current?.undo();
+  const handleRedo = () => engineRef.current?.redo();
+  const handleDismantle = () => engineRef.current?.dismantle();
 
   const handleNewScene = (type: 'Eagle') => {
     const generator = Generators[type];
@@ -103,6 +159,23 @@ const App: React.FC = () => {
       engineRef.current.loadInitialModel(generator());
       setCurrentBaseModel('Eagle');
       setGroundingSources([]);
+    }
+  };
+
+  const handleRefresh = () => {
+    if (!engineRef.current) return;
+    // Check if current base model is a preset
+    if (currentBaseModel === 'Eagle') {
+        engineRef.current.loadInitialModel(Generators.Eagle());
+    } else {
+        // Find in custom builds
+        const custom = customBuilds.find(b => b.name === currentBaseModel);
+        if (custom) {
+            engineRef.current.loadInitialModel(custom.data);
+        } else {
+            // Default fallback
+            engineRef.current.loadInitialModel(Generators.Eagle());
+        }
     }
   };
 
@@ -122,9 +195,7 @@ const App: React.FC = () => {
   };
 
   const handleSelectCustomRebuild = (model: SavedModel) => {
-      if (engineRef.current) {
-          engineRef.current.rebuild(model.data);
-      }
+      if (engineRef.current) engineRef.current.rebuild(model.data);
   };
 
   const handleShowJson = () => {
@@ -140,57 +211,46 @@ const App: React.FC = () => {
       setIsJsonModalOpen(true);
   };
 
+  const handleSnapshot = () => {
+      if (!engineRef.current) return;
+      const dataUrl = engineRef.current.takeSnapshot();
+      const link = document.createElement('a');
+      link.download = `voxel-creation-${Date.now()}.png`;
+      link.href = dataUrl;
+      link.click();
+  };
+
   const handleJsonImport = (jsonStr: string) => {
       try {
           const rawData = JSON.parse(jsonStr);
-          if (!Array.isArray(rawData)) throw new Error("JSON must be an array");
-
           const voxelData: VoxelData[] = rawData.map((v: any) => {
               let colorVal = v.c || v.color;
               let colorInt = 0xCCCCCC;
-
               if (typeof colorVal === 'string') {
                   if (colorVal.startsWith('#')) colorVal = colorVal.substring(1);
                   colorInt = parseInt(colorVal, 16);
-              } else if (typeof colorVal === 'number') {
-                  colorInt = colorVal;
-              }
+              } else if (typeof colorVal === 'number') colorInt = colorVal;
 
               return {
                   x: Number(v.x) || 0,
                   y: Number(v.y) || 0,
                   z: Number(v.z) || 0,
-                  color: isNaN(colorInt) ? 0xCCCCCC : colorInt
+                  color: isNaN(colorInt) ? 0xCCCCCC : colorInt,
+                  material: v.material ?? VoxelMaterial.MATTE
               };
           });
-          
           if (engineRef.current) {
               engineRef.current.loadInitialModel(voxelData);
               setCurrentBaseModel('Imported Build');
               setGroundingSources([]);
           }
       } catch (e) {
-          console.error("Failed to import JSON", e);
-          alert("Failed to import JSON. Please ensure the format is correct.");
+          alert("Import failed. Check JSON format.");
       }
   };
 
-  const openPrompt = (mode: 'create' | 'morph') => {
-      setPromptMode(mode);
-      setIsPromptModalOpen(true);
-  }
-  
-  const handleToggleRotation = () => {
-      const newState = !isAutoRotate;
-      setIsAutoRotate(newState);
-      if (engineRef.current) {
-          engineRef.current.setAutoRotate(newState);
-      }
-  }
-
   const handlePromptSubmit = async (prompt: string) => {
     if (!process.env.API_KEY) throw new Error("API Key not found");
-
     setIsGenerating(true);
     setGroundingSources([]);
     setIsPromptModalOpen(false);
@@ -198,18 +258,11 @@ const App: React.FC = () => {
     try {
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const model = 'gemini-3-pro-preview';
-        
-        let systemContext = "";
-        if (promptMode === 'morph' && engineRef.current) {
-            const availableColors = engineRef.current.getUniqueColors().join(', ');
-            systemContext = `CONTEXT: Re-assembling existing voxels. Current palette: [${availableColors}]. Prefer these colors. Roughly same volume.`;
-        } else {
-            systemContext = `CONTEXT: Creating new voxel art. Be creative with colors.`;
-        }
+        const systemContext = `Voxel builder. Output JSON list of {x, y, z, color(hex), material(0:Matte, 1:Metal, 2:Glow)}. MAX 800 voxels. Focus on aesthetics. Model: "${prompt}".`;
 
         const response = await ai.models.generateContent({
             model,
-            contents: `${systemContext}\nTask: Generate a 3D voxel art model of: "${prompt}". Return ONLY a JSON array.`,
+            contents: systemContext,
             config: {
                 tools: [{ googleSearch: {} }],
                 responseMimeType: "application/json",
@@ -221,7 +274,8 @@ const App: React.FC = () => {
                             x: { type: Type.INTEGER },
                             y: { type: Type.INTEGER },
                             z: { type: Type.INTEGER },
-                            color: { type: Type.STRING }
+                            color: { type: Type.STRING },
+                            material: { type: Type.INTEGER, description: "0:Matte, 1:Metal, 2:Glow" }
                         },
                         required: ["x", "y", "z", "color"]
                     }
@@ -231,38 +285,39 @@ const App: React.FC = () => {
 
         const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
         if (chunks) {
-            const sources: GroundingSource[] = chunks.filter(c => c.web).map(c => ({ title: c.web.title || 'Source', uri: c.web.uri }));
-            setGroundingSources(sources);
+            setGroundingSources(chunks.filter(c => c.web).map(c => ({ title: c.web.title || 'Source', uri: c.web.uri })));
         }
 
         if (response.text) {
             const rawData = JSON.parse(response.text);
-            const voxelData: VoxelData[] = rawData.map((v: any) => {
-                let colorStr = v.color;
-                if (colorStr.startsWith('#')) colorStr = colorStr.substring(1);
-                return { x: v.x, y: v.y, z: v.z, color: parseInt(colorStr, 16) };
-            });
-
+            const voxelData: VoxelData[] = rawData.map((v: any) => ({
+                x: v.x, y: v.y, z: v.z, 
+                color: parseInt(v.color.replace('#', ''), 16),
+                material: v.material ?? VoxelMaterial.MATTE
+            }));
             if (engineRef.current) {
                 if (promptMode === 'create') {
                     engineRef.current.loadInitialModel(voxelData);
-                    setCustomBuilds(prev => [...prev, { name: prompt, data: voxelData }]);
+                    setCustomBuilds(p => [...p, { name: prompt, data: voxelData, timestamp: Date.now() }]);
                     setCurrentBaseModel(prompt);
                 } else {
                     engineRef.current.rebuild(voxelData);
-                    setCustomRebuilds(prev => [...prev, { name: prompt, data: voxelData, baseModel: currentBaseModel }]);
+                    setCustomRebuilds(p => [...p, { name: prompt, data: voxelData, baseModel: currentBaseModel, timestamp: Date.now() }]);
                 }
             }
         }
     } catch (err) {
-        console.error(err);
         alert("Generation failed!");
     } finally {
         setIsGenerating(false);
     }
   };
 
-  const relevantRebuilds = customRebuilds.filter(r => r.baseModel === currentBaseModel);
+  const handleToggleRotation = () => {
+      const newState = !isAutoRotate;
+      setIsAutoRotate(newState);
+      engineRef.current?.setAutoRotate(newState);
+  }
 
   return (
     <div className="relative w-full h-screen bg-[#f0f2f5] overflow-hidden">
@@ -274,26 +329,34 @@ const App: React.FC = () => {
         appMode={appMode}
         buildTool={buildTool}
         selectedColor={selectedColor}
+        selectedMaterial={selectedMaterial}
         currentBaseModel={currentBaseModel}
         customBuilds={customBuilds}
-        customRebuilds={relevantRebuilds} 
+        customRebuilds={customRebuilds.filter(r => r.baseModel === currentBaseModel)} 
         isAutoRotate={isAutoRotate}
         isInfoVisible={showWelcome}
         isGenerating={isGenerating}
         groundingSources={groundingSources}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        onSnapshot={handleSnapshot}
         onDismantle={handleDismantle}
         onRebuild={handleRebuild}
         onNewScene={handleNewScene}
+        onRefresh={handleRefresh}
         onSelectCustomBuild={handleSelectCustomBuild}
         onSelectCustomRebuild={handleSelectCustomRebuild}
-        onPromptCreate={() => openPrompt('create')}
-        onPromptMorph={() => openPrompt('morph')}
+        onPromptCreate={() => {setPromptMode('create'); setIsPromptModalOpen(true);}}
+        onPromptMorph={() => {setPromptMode('morph'); setIsPromptModalOpen(true);}}
         onShowJson={handleShowJson}
         onImportJson={handleImportClick}
         onToggleRotation={handleToggleRotation}
         onToggleInfo={() => setShowWelcome(!showWelcome)}
         onToggleMode={handleToggleMode}
         onSetTool={handleSetTool}
+        onSetMaterial={handleSetMaterial}
         onSetColor={handleSetColor}
       />
 
