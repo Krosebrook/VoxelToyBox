@@ -11,12 +11,13 @@ import { JsonModal } from './components/JsonModal';
 import { PromptModal } from './components/PromptModal';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { Generators } from './utils/voxelGenerators';
-import { AppState, AppMode, VoxelData, SavedModel, GroundingSource, BuildTool, VoxelMaterial } from './types';
+import { AppState, AppMode, VoxelData, SavedModel, GroundingSource, BuildTool, VoxelMaterial, CustomColor } from './types';
 import { CONFIG } from './utils/voxelConstants';
 import { GoogleGenAI, Type } from "@google/genai";
 import { Search } from 'lucide-react';
 
 const STORAGE_KEY = 'voxel_toybox_saved_models';
+const PALETTE_KEY = 'voxel_toybox_custom_palette';
 const AUTO_SAVE_KEY = 'voxel_toybox_current_draft';
 
 /**
@@ -34,6 +35,13 @@ const App: React.FC = () => {
   const [selectedColor, setSelectedColor] = useState<number>(0x3b82f6);
   const [selectedMaterial, setSelectedMaterial] = useState<VoxelMaterial>(VoxelMaterial.MATTE);
   const [voxelSize, setVoxelSize] = useState<number>(CONFIG.VOXEL_SIZE);
+  const [isMirrorMode, setIsMirrorMode] = useState(false);
+
+  // Selection State
+  const [selectedCount, setSelectedCount] = useState(0);
+
+  // Custom Palette state
+  const [customPalette, setCustomPalette] = useState<CustomColor[]>([]);
 
   // Stats & Modals
   const [voxelCount, setVoxelCount] = useState<number>(0);
@@ -60,7 +68,7 @@ const App: React.FC = () => {
   const [customRebuilds, setCustomRebuilds] = useState<SavedModel[]>([]);
   const [groundingSources, setGroundingSources] = useState<GroundingSource[]>([]);
 
-  /** Load persistent library from storage on mount. */
+  /** Load persistent library and palette from storage on mount. */
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
@@ -69,6 +77,13 @@ const App: React.FC = () => {
             setCustomBuilds(builds || []);
             setCustomRebuilds(rebuilds || []);
         } catch (e) { console.error("Library load error", e); }
+    }
+
+    const savedPalette = localStorage.getItem(PALETTE_KEY);
+    if (savedPalette) {
+      try {
+        setCustomPalette(JSON.parse(savedPalette));
+      } catch (e) { console.error("Palette load error", e); }
     }
     
     // Check for API key presence
@@ -88,6 +103,11 @@ const App: React.FC = () => {
         rebuilds: customRebuilds 
     }));
   }, [customBuilds, customRebuilds]);
+
+  /** Sync palette to storage when it changes. */
+  useEffect(() => {
+    localStorage.setItem(PALETTE_KEY, JSON.stringify(customPalette));
+  }, [customPalette]);
 
   /** Persistence: Save the current canvas draft. */
   const performAutoSave = useCallback(() => {
@@ -144,7 +164,8 @@ const App: React.FC = () => {
           setSelectedMaterial(mat);
           engineRef.current?.setBuildProps(color, mat);
       },
-      (u, r) => { setCanUndo(u); setCanRedo(r); }
+      (u, r) => { setCanUndo(u); setCanRedo(r); },
+      (selected) => setSelectedCount(selected)
     );
 
     engineRef.current = engine;
@@ -193,6 +214,19 @@ const App: React.FC = () => {
       setCurrentBaseModel(newModel.name);
       performAutoSave();
     }
+  };
+
+  const handleSaveColor = (color: number) => {
+    const defaultName = `Color #${color.toString(16).padStart(6, '0')}`;
+    const name = window.prompt("Enter a name for this color:", defaultName);
+    if (name?.trim()) {
+      const newColor: CustomColor = { name: name.trim(), hex: color };
+      setCustomPalette(prev => [...prev, newColor]);
+    }
+  };
+
+  const handleDeleteColor = (index: number) => {
+    setCustomPalette(prev => prev.filter((_, i) => i !== index));
   };
 
   const handleSelectApiKey = async () => {
@@ -310,6 +344,12 @@ Rules:
     }
   };
 
+  const handleToggleMirror = () => {
+    const newState = !isMirrorMode;
+    setIsMirrorMode(newState);
+    engineRef.current?.setMirrorMode(newState);
+  };
+
   return (
     <div className="relative w-full h-screen bg-[#f0f2f5] overflow-hidden antialiased">
       <div ref={containerRef} className="absolute inset-0 z-0" />
@@ -320,8 +360,11 @@ Rules:
         voxelSize={voxelSize}
         currentBaseModel={currentBaseModel} customBuilds={customBuilds}
         customRebuilds={customRebuilds.filter(r => r.baseModel === currentBaseModel)} 
+        customPalette={customPalette}
+        selectedCount={selectedCount}
         isAutoRotate={isAutoRotate} isInfoVisible={showWelcome} isGenerating={isGenerating}
         groundingSources={groundingSources} canUndo={canUndo} canRedo={canRedo} lastSaveTime={lastSaveTime}
+        isMirrorMode={isMirrorMode}
         onUndo={() => engineRef.current?.undo()} onRedo={() => engineRef.current?.redo()}
         onSnapshot={() => {
             const link = document.createElement('a');
@@ -336,6 +379,8 @@ Rules:
             engineRef.current?.loadInitialModel(target ? target.data : Generators.Eagle());
         }}
         onSaveCurrent={handleSaveCurrent}
+        onSaveColor={handleSaveColor}
+        onDeleteColor={handleDeleteColor}
         onSelectCustomBuild={(m) => { engineRef.current?.loadInitialModel(m.data); setCurrentBaseModel(m.name); }}
         onSelectCustomRebuild={(m) => engineRef.current?.rebuild(m.data)}
         onPromptCreate={() => {setPromptMode('create'); setIsPromptModalOpen(true);}}
@@ -344,10 +389,14 @@ Rules:
         onImportJson={() => { setJsonModalMode('import'); setIsJsonModalOpen(true); }}
         onToggleRotation={handleToggleRotation} onToggleInfo={() => setShowWelcome(!showWelcome)}
         onToggleMode={handleToggleMode}
+        onToggleMirror={handleToggleMirror}
         onSetTool={(t) => { setBuildTool(t); engineRef.current?.setTool(t); }}
         onSetMaterial={(m) => { setSelectedMaterial(m); engineRef.current?.setBuildProps(selectedColor, m); }}
         onSetColor={(c) => { setSelectedColor(c); engineRef.current?.setBuildProps(c, selectedMaterial); }}
         onSetVoxelSize={(s) => { setVoxelSize(s); engineRef.current?.setVoxelSize(s); }}
+        onDeleteSelected={() => engineRef.current?.deleteSelected()}
+        onCopySelected={() => engineRef.current?.copySelected()}
+        onMoveSelected={(a, d) => engineRef.current?.moveSelected(a, d)}
       />
 
       <WelcomeScreen visible={showWelcome} />

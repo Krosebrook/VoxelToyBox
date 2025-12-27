@@ -20,12 +20,12 @@ export enum AppState {
 export enum AppMode {
   /** Navigation and visualization focus. */
   VIEW = 'VIEW',
-  /** Tool-based manipulation (pencil, eraser, picker). */
+  /** Tool-based manipulation (pencil, eraser, picker, paint bucket). */
   BUILD = 'BUILD'
 }
 
 /** Available building interaction types. */
-export type BuildTool = 'pencil' | 'eraser' | 'picker';
+export type BuildTool = 'pencil' | 'eraser' | 'picker' | 'select' | 'paintBucket';
 
 /** Surface properties for voxel rendering groups. */
 export enum VoxelMaterial {
@@ -44,6 +44,12 @@ export interface VoxelData {
   z: number;
   color: number;
   material?: VoxelMaterial;
+}
+
+/** User-saved color entry with a name and hex value. */
+export interface CustomColor {
+  name: string;
+  hex: number;
 }
 
 /** Extended data used within the VoxelEngine for physics and rendering. */
