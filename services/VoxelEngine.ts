@@ -8,6 +8,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import { AppState, AppMode, SimulationVoxel, RebuildTarget, VoxelData, BuildTool, VoxelMaterial } from '../types';
 import { CONFIG } from '../utils/voxelConstants';
+import { Sound } from './SoundService';
 
 /**
  * VoxelEngine handles the heavy lifting of 3D rendering, physics simulation,
@@ -196,6 +197,7 @@ export class VoxelEngine {
     this.clearSelection();
     this.rebuildInstanceMeshes();
     this.onCountChange(this.voxels.length);
+    Sound.play('break');
   }
 
   public copySelected() {
@@ -210,6 +212,7 @@ export class VoxelEngine {
     this.voxels.push(...copies);
     this.rebuildInstanceMeshes();
     this.onCountChange(this.voxels.length);
+    Sound.play('place');
   }
 
   public moveSelected(axis: 'x' | 'y' | 'z', dir: number) {
@@ -221,6 +224,7 @@ export class VoxelEngine {
         }
     });
     this.rebuildInstanceMeshes();
+    Sound.play('place');
   }
 
   public clearSelection() {
@@ -296,6 +300,8 @@ export class VoxelEngine {
   }
 
   private onMouseDown(event: MouseEvent) {
+      Sound.resume(); // Ensure context is running on user interaction
+      
       if (this.mode !== AppMode.BUILD || this.state !== AppState.STABLE) return;
       if (event.button !== 0) return;
 
@@ -327,6 +333,7 @@ export class VoxelEngine {
               const meshVoxels = this.voxels.filter(v => v.material === Number(intersect.object.name));
               const v = meshVoxels[intersect.instanceId!];
               this.onColorPick(v.color.getHex(), v.material);
+              Sound.play('ui');
           } else if (this.buildTool === 'paintBucket' && isVoxel) {
               const meshVoxels = this.voxels.filter(v => v.material === Number(intersect.object.name));
               const v = meshVoxels[intersect.instanceId!];
@@ -335,56 +342,70 @@ export class VoxelEngine {
       }
   }
 
+  private performFloodFill(sx: number, sy: number, sz: number, fillHex: number, fillMat: VoxelMaterial, voxelMap: Map<string, SimulationVoxel>): number {
+      const startVoxel = voxelMap.get(`${sx},${sy},${sz}`);
+      if (!startVoxel) return 0;
+      
+      const targetHex = startVoxel.color.getHex();
+      const targetMat = startVoxel.material;
+      
+      if (targetHex === fillHex && targetMat === fillMat) return 0;
+      
+      const queue: [number, number, number][] = [[sx, sy, sz]];
+      const visited = new Set<string>();
+      visited.add(`${sx},${sy},${sz}`);
+      
+      let affected = 0;
+      
+      while(queue.length > 0) {
+          const [cx, cy, cz] = queue.shift()!;
+          const key = `${cx},${cy},${cz}`;
+          const v = voxelMap.get(key);
+          
+          if (v && v.color.getHex() === targetHex && v.material === targetMat) {
+              v.color.setHex(fillHex);
+              v.material = fillMat;
+              affected++;
+              
+              const neighbors = [
+                  [cx + 1, cy, cz], [cx - 1, cy, cz],
+                  [cx, cy + 1, cz], [cx, cy - 1, cz],
+                  [cx, cy, cz + 1], [cx, cy, cz - 1]
+              ];
+              
+              for(const [nx, ny, nz] of neighbors) {
+                  const nKey = `${nx},${ny},${nz}`;
+                  if (!visited.has(nKey) && voxelMap.has(nKey)) {
+                      const nVoxel = voxelMap.get(nKey);
+                      if (nVoxel && nVoxel.color.getHex() === targetHex && nVoxel.material === targetMat) {
+                        visited.add(nKey);
+                        queue.push([nx, ny, nz]);
+                      }
+                  }
+              }
+          }
+      }
+      return affected;
+  }
+
   private paintFill(startX: number, startY: number, startZ: number, fillHex: number, fillMat: VoxelMaterial) {
-    const startVoxel = this.voxels.find(v => v.x === startX && v.y === startY && v.z === startZ);
-    if (!startVoxel) return;
-
-    const targetHex = startVoxel.color.getHex();
-    const targetMat = startVoxel.material;
-
-    // If already the same, skip
-    if (targetHex === fillHex && targetMat === fillMat) return;
-
     this.pushHistory();
 
-    const queue: [number, number, number][] = [[startX, startY, startZ]];
-    const visited = new Set<string>();
-    visited.add(`${startX},${startY},${startZ}`);
-
-    // Map for fast spatial lookup
     const voxelMap = new Map<string, SimulationVoxel>();
     this.voxels.forEach(v => voxelMap.set(`${v.x},${v.y},${v.z}`, v));
 
-    let affected = 0;
-    while (queue.length > 0) {
-      const [x, y, z] = queue.shift()!;
-      const key = `${x},${y},${z}`;
-      const v = voxelMap.get(key);
+    let affected = this.performFloodFill(startX, startY, startZ, fillHex, fillMat, voxelMap);
 
-      if (v && v.color.getHex() === targetHex && v.material === targetMat) {
-        v.color.setHex(fillHex);
-        v.material = fillMat;
-        affected++;
-
-        // Neighbors (6-connectivity)
-        const neighbors = [
-          [x + 1, y, z], [x - 1, y, z],
-          [x, y + 1, z], [x, y - 1, z],
-          [x, y, z + 1], [x, y, z - 1]
-        ];
-
-        for (const [nx, ny, nz] of neighbors) {
-          const nkey = `${nx},${ny},${nz}`;
-          if (!visited.has(nkey) && voxelMap.has(nkey)) {
-            visited.add(nkey);
-            queue.push([nx, ny, nz]);
-          }
-        }
-      }
+    if (this.isMirrorMode && startX !== 0) {
+       affected += this.performFloodFill(-startX, startY, startZ, fillHex, fillMat, voxelMap);
     }
 
     if (affected > 0) {
       this.rebuildInstanceMeshes();
+      Sound.play('paint');
+    } else {
+      this.undoStack.pop();
+      this.notifyHistory();
     }
   }
 
@@ -407,6 +428,7 @@ export class VoxelEngine {
       });
       this.onSelectionChange?.(this.selectedVoxelIds.size);
       this.rebuildInstanceMeshes();
+      if (this.selectedVoxelIds.size > 0) Sound.play('ui');
   }
 
   private rebuildInstanceMeshes() {
@@ -464,6 +486,12 @@ export class VoxelEngine {
         groups.get(v.material)!.push(v);
     });
 
+    // Animate selection outline opacity if it exists
+    if (this.persistentSelectionOutline) {
+        const opacityPulse = 0.5 + Math.sin(Date.now() * 0.005) * 0.3;
+        (this.persistentSelectionOutline.material as THREE.MeshBasicMaterial).opacity = opacityPulse;
+    }
+
     groups.forEach((voxels, type) => {
         const mesh = this.meshes.get(type);
         if (!mesh) return;
@@ -495,7 +523,7 @@ export class VoxelEngine {
             
             if (isSelected) {
                 // Pulse size slightly for visual flair
-                const pulse = 1.0 + Math.sin(Date.now() * 0.005) * 0.02;
+                const pulse = 1.05 + Math.sin(Date.now() * 0.008) * 0.05;
                 this.dummy.scale.set(pulse, pulse, pulse);
             } else {
                 // Effectively hide non-selected ones
@@ -528,8 +556,18 @@ export class VoxelEngine {
 
   private notifyHistory() { this.onHistoryChange?.(this.undoStack.length > 0, this.redoStack.length > 0); }
 
-  public undo() { if (this.undoStack.length === 0) return; this.redoStack.push(this.getVoxelData()); this.loadSnapshot(this.undoStack.pop()!); }
-  public redo() { if (this.redoStack.length === 0) return; this.undoStack.push(this.getVoxelData()); this.loadSnapshot(this.redoStack.pop()!); }
+  public undo() { 
+      if (this.undoStack.length === 0) return; 
+      this.redoStack.push(this.getVoxelData()); 
+      this.loadSnapshot(this.undoStack.pop()!); 
+      Sound.play('undo');
+  }
+  public redo() { 
+      if (this.redoStack.length === 0) return; 
+      this.undoStack.push(this.getVoxelData()); 
+      this.loadSnapshot(this.redoStack.pop()!); 
+      Sound.play('redo');
+  }
 
   private loadSnapshot(data: VoxelData[]) {
     this.voxels = data.map((v, i) => ({
@@ -573,6 +611,7 @@ export class VoxelEngine {
 
       this.rebuildInstanceMeshes();
       this.onCountChange(this.voxels.length);
+      Sound.play('place');
   }
 
   private removeVoxel(instanceId: number, materialType: VoxelMaterial) {
@@ -599,6 +638,7 @@ export class VoxelEngine {
 
       this.rebuildInstanceMeshes();
       this.onCountChange(this.voxels.length);
+      Sound.play('break');
   }
 
   public loadInitialModel(data: VoxelData[]) {
@@ -614,6 +654,7 @@ export class VoxelEngine {
     if (this.state !== AppState.STABLE || this.mode === AppMode.BUILD) return;
     this.state = AppState.DISMANTLING;
     this.onStateChange(this.state);
+    Sound.play('break');
     this.voxels.forEach(v => { v.vx = (Math.random() - 0.5) * 0.9; v.vy = Math.random() * 0.7; v.vz = (Math.random() - 0.5) * 0.9; v.rvx = (Math.random() - 0.5) * 0.3; v.rvy = (Math.random() - 0.5) * 0.3; v.rvz = (Math.random() - 0.5) * 0.3; });
   }
 
@@ -641,6 +682,7 @@ export class VoxelEngine {
     for (let i = 0; i < this.voxels.length; i++) if (!mappings[i]) mappings[i] = { x: this.voxels[i].x, y: this.voxels[i].y, z: this.voxels[i].z, material: this.voxels[i].material, isRubble: true, delay: 0 };
     this.rebuildTargets = mappings; this.rebuildStartTime = Date.now();
     this.state = AppState.REBUILDING; this.onStateChange(this.state);
+    Sound.play('place');
   }
 
   private updatePhysics() {
@@ -659,7 +701,7 @@ export class VoxelEngine {
             if (Math.abs(t.x - v.x) + Math.abs(t.y - v.y) + Math.abs(t.z - v.z) > 0.02) allDone = false;
             else { v.x = t.x; v.y = t.y; v.z = t.z; v.rx = v.ry = v.rz = 0; }
         });
-        if (allDone) { this.state = AppState.STABLE; this.onStateChange(this.state); this.onCountChange(this.voxels.length); }
+        if (allDone) { this.state = AppState.STABLE; this.onStateChange(this.state); this.onCountChange(this.voxels.length); Sound.play('success'); }
     }
   }
 

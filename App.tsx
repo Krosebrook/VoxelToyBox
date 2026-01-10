@@ -15,6 +15,7 @@ import { AppState, AppMode, VoxelData, SavedModel, GroundingSource, BuildTool, V
 import { CONFIG } from './utils/voxelConstants';
 import { GoogleGenAI, Type } from "@google/genai";
 import { Search } from 'lucide-react';
+import { Sound } from './services/SoundService';
 
 const STORAGE_KEY = 'voxel_toybox_saved_models';
 const PALETTE_KEY = 'voxel_toybox_custom_palette';
@@ -36,6 +37,7 @@ const App: React.FC = () => {
   const [selectedMaterial, setSelectedMaterial] = useState<VoxelMaterial>(VoxelMaterial.MATTE);
   const [voxelSize, setVoxelSize] = useState<number>(CONFIG.VOXEL_SIZE);
   const [isMirrorMode, setIsMirrorMode] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
 
   // Selection State
   const [selectedCount, setSelectedCount] = useState(0);
@@ -131,9 +133,10 @@ const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [performAutoSave]);
 
-  /** Global keybindings for building and navigation. */
+  /** Global keybindings and interaction listeners. */
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+        Sound.resume();
         const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
         const cmd = isMac ? e.metaKey : e.ctrlKey;
 
@@ -147,8 +150,18 @@ const App: React.FC = () => {
             handleToggleMode();
         }
     };
+
+    const handleInteract = () => Sound.resume();
+
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('mousedown', handleInteract);
+    window.addEventListener('touchstart', handleInteract);
+
+    return () => {
+        window.removeEventListener('keydown', handleKeyDown);
+        window.removeEventListener('mousedown', handleInteract);
+        window.removeEventListener('touchstart', handleInteract);
+    };
   }, [appMode, isAutoRotate]);
 
   /** Core Engine Initialization. */
@@ -205,14 +218,44 @@ const App: React.FC = () => {
       engineRef.current?.setAutoRotate(newState);
   };
 
+  const handleToggleMute = () => {
+    const muted = Sound.toggleMute();
+    setIsMuted(muted);
+  };
+
   const handleSaveCurrent = () => {
     if (!engineRef.current) return;
-    const name = window.prompt("Enter a name for your build:", currentBaseModel || "My Build");
+    const data = engineRef.current.getVoxelData();
+    const existingIndex = customBuilds.findIndex(b => b.name === currentBaseModel);
+    
+    if (existingIndex !== -1 && currentBaseModel !== 'Recovered Draft') {
+        const updated = [...customBuilds];
+        updated[existingIndex] = { ...updated[existingIndex], data, timestamp: Date.now() };
+        setCustomBuilds(updated);
+        performAutoSave();
+    } else {
+        handleSaveAs();
+    }
+  };
+
+  const handleSaveAs = () => {
+    if (!engineRef.current) return;
+    const name = window.prompt("Save new build as:", currentBaseModel || "My Build");
     if (name?.trim()) {
       const newModel: SavedModel = { name: name.trim(), data: engineRef.current.getVoxelData(), timestamp: Date.now() };
       setCustomBuilds(prev => [...prev.filter(b => b.name !== newModel.name), newModel]);
       setCurrentBaseModel(newModel.name);
       performAutoSave();
+    }
+  };
+
+  const handleLoadLatest = () => {
+    const recovered = localStorage.getItem(AUTO_SAVE_KEY);
+    if (recovered) {
+      try {
+        engineRef.current?.loadInitialModel(JSON.parse(recovered));
+        setCurrentBaseModel('Recovered Draft');
+      } catch (e) { console.error("Failed to load draft", e); }
     }
   };
 
@@ -332,6 +375,7 @@ Rules:
         }
     } catch (err: any) { 
         console.error("AI Generation Error:", err);
+        Sound.play('error');
         if (err.message?.includes("Requested entity was not found")) {
             setHasApiKey(false);
             alert("Model access error. Please re-select a paid API key via the key dialog.");
@@ -364,7 +408,7 @@ Rules:
         selectedCount={selectedCount}
         isAutoRotate={isAutoRotate} isInfoVisible={showWelcome} isGenerating={isGenerating}
         groundingSources={groundingSources} canUndo={canUndo} canRedo={canRedo} lastSaveTime={lastSaveTime}
-        isMirrorMode={isMirrorMode}
+        isMirrorMode={isMirrorMode} isMuted={isMuted}
         onUndo={() => engineRef.current?.undo()} onRedo={() => engineRef.current?.redo()}
         onSnapshot={() => {
             const link = document.createElement('a');
@@ -379,6 +423,8 @@ Rules:
             engineRef.current?.loadInitialModel(target ? target.data : Generators.Eagle());
         }}
         onSaveCurrent={handleSaveCurrent}
+        onSaveAs={handleSaveAs}
+        onLoadLatest={handleLoadLatest}
         onSaveColor={handleSaveColor}
         onDeleteColor={handleDeleteColor}
         onSelectCustomBuild={(m) => { engineRef.current?.loadInitialModel(m.data); setCurrentBaseModel(m.name); }}
@@ -390,6 +436,7 @@ Rules:
         onToggleRotation={handleToggleRotation} onToggleInfo={() => setShowWelcome(!showWelcome)}
         onToggleMode={handleToggleMode}
         onToggleMirror={handleToggleMirror}
+        onToggleMute={handleToggleMute}
         onSetTool={(t) => { setBuildTool(t); engineRef.current?.setTool(t); }}
         onSetMaterial={(m) => { setSelectedMaterial(m); engineRef.current?.setBuildProps(selectedColor, m); }}
         onSetColor={(c) => { setSelectedColor(c); engineRef.current?.setBuildProps(c, selectedMaterial); }}
