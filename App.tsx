@@ -16,6 +16,8 @@ import { CONFIG } from './utils/voxelConstants';
 import { GoogleGenAI, Type } from "@google/genai";
 import { Search } from 'lucide-react';
 import { Sound } from './services/SoundService';
+import { ExporterService } from './services/ExporterService';
+import { resizeThumbnail } from './utils/imageHelpers';
 
 const STORAGE_KEY = 'voxel_toybox_saved_models';
 const PALETTE_KEY = 'voxel_toybox_custom_palette';
@@ -100,10 +102,15 @@ const App: React.FC = () => {
 
   /** Sync library to storage when it changes. */
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ 
-        builds: customBuilds, 
-        rebuilds: customRebuilds 
-    }));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ 
+          builds: customBuilds, 
+          rebuilds: customRebuilds 
+      }));
+    } catch (e) {
+      console.error("Storage limit reached", e);
+      alert("Storage full! Please delete some saved builds.");
+    }
   }, [customBuilds, customRebuilds]);
 
   /** Sync palette to storage when it changes. */
@@ -223,30 +230,51 @@ const App: React.FC = () => {
     setIsMuted(muted);
   };
 
-  const handleSaveCurrent = () => {
+  const handleSaveCurrent = async () => {
     if (!engineRef.current) return;
     const data = engineRef.current.getVoxelData();
+    
+    // Capture and resize thumbnail
+    const snapshot = engineRef.current.takeSnapshot();
+    const thumbnail = await resizeThumbnail(snapshot);
+
     const existingIndex = customBuilds.findIndex(b => b.name === currentBaseModel);
     
     if (existingIndex !== -1 && currentBaseModel !== 'Recovered Draft') {
         const updated = [...customBuilds];
-        updated[existingIndex] = { ...updated[existingIndex], data, timestamp: Date.now() };
+        updated[existingIndex] = { ...updated[existingIndex], data, timestamp: Date.now(), thumbnail };
         setCustomBuilds(updated);
         performAutoSave();
+        Sound.play('success');
     } else {
         handleSaveAs();
     }
   };
 
-  const handleSaveAs = () => {
+  const handleSaveAs = async () => {
     if (!engineRef.current) return;
     const name = window.prompt("Save new build as:", currentBaseModel || "My Build");
     if (name?.trim()) {
-      const newModel: SavedModel = { name: name.trim(), data: engineRef.current.getVoxelData(), timestamp: Date.now() };
-      setCustomBuilds(prev => [...prev.filter(b => b.name !== newModel.name), newModel]);
-      setCurrentBaseModel(newModel.name);
-      performAutoSave();
+        const snapshot = engineRef.current.takeSnapshot();
+        const thumbnail = await resizeThumbnail(snapshot);
+        const newModel: SavedModel = { 
+            name: name.trim(), 
+            data: engineRef.current.getVoxelData(), 
+            timestamp: Date.now(),
+            thumbnail 
+        };
+        setCustomBuilds(prev => [...prev.filter(b => b.name !== newModel.name), newModel]);
+        setCurrentBaseModel(newModel.name);
+        performAutoSave();
+        Sound.play('success');
     }
+  };
+
+  const handleDeleteBuild = (index: number) => {
+      if (window.confirm("Are you sure you want to delete this build?")) {
+          setCustomBuilds(prev => prev.filter((_, i) => i !== index));
+          Sound.play('break');
+      }
   };
 
   const handleLoadLatest = () => {
@@ -255,8 +283,26 @@ const App: React.FC = () => {
       try {
         engineRef.current?.loadInitialModel(JSON.parse(recovered));
         setCurrentBaseModel('Recovered Draft');
+        Sound.play('ui');
       } catch (e) { console.error("Failed to load draft", e); }
     }
+  };
+
+  const handleExportObj = () => {
+    if (!engineRef.current) return;
+    const data = engineRef.current.getVoxelData();
+    
+    // Generate MTL
+    const mtlContent = ExporterService.generateMTL(data);
+    ExporterService.downloadFile('model.mtl', mtlContent);
+
+    // Generate OBJ (with short delay to ensure browser handles multiple downloads)
+    setTimeout(() => {
+        const objContent = ExporterService.generateOBJ(data);
+        ExporterService.downloadFile('model.obj', objContent);
+    }, 200);
+
+    Sound.play('success');
   };
 
   const handleSaveColor = (color: number) => {
@@ -359,10 +405,19 @@ Rules:
                 material: v.material ?? VoxelMaterial.MATTE
             }));
             
+            // Create thumbnail for AI generated content if in 'create' mode
             if (promptMode === 'create') {
                 engineRef.current?.loadInitialModel(data);
-                setCustomBuilds(p => [...p, { name: prompt, data, timestamp: Date.now() }]);
-                setCurrentBaseModel(prompt);
+                // Allow engine to render one frame before taking snapshot
+                requestAnimationFrame(async () => {
+                    const snapshot = engineRef.current?.takeSnapshot();
+                    if (snapshot) {
+                        const thumbnail = await resizeThumbnail(snapshot);
+                        setCustomBuilds(p => [...p, { name: prompt, data, timestamp: Date.now(), thumbnail }]);
+                        setCurrentBaseModel(prompt);
+                        performAutoSave();
+                    }
+                });
             } else {
                 if (appState === AppState.STABLE) {
                     engineRef.current?.dismantle();
@@ -425,10 +480,12 @@ Rules:
         onSaveCurrent={handleSaveCurrent}
         onSaveAs={handleSaveAs}
         onLoadLatest={handleLoadLatest}
+        onExportObj={handleExportObj}
         onSaveColor={handleSaveColor}
         onDeleteColor={handleDeleteColor}
         onSelectCustomBuild={(m) => { engineRef.current?.loadInitialModel(m.data); setCurrentBaseModel(m.name); }}
         onSelectCustomRebuild={(m) => engineRef.current?.rebuild(m.data)}
+        onDeleteBuild={handleDeleteBuild}
         onPromptCreate={() => {setPromptMode('create'); setIsPromptModalOpen(true);}}
         onPromptMorph={() => {setPromptMode('morph'); setIsPromptModalOpen(true);}}
         onShowJson={() => { setJsonData(engineRef.current?.getJsonData() || ''); setJsonModalMode('view'); setIsJsonModalOpen(true); }}
@@ -439,6 +496,7 @@ Rules:
         onToggleMute={handleToggleMute}
         onSetTool={(t) => { setBuildTool(t); engineRef.current?.setTool(t); }}
         onSetMaterial={(m) => { setSelectedMaterial(m); engineRef.current?.setBuildProps(selectedColor, m); }}
+        onSetSelectionMaterial={(m) => engineRef.current?.setSelectionMaterial(m)}
         onSetColor={(c) => { setSelectedColor(c); engineRef.current?.setBuildProps(c, selectedMaterial); }}
         onSetVoxelSize={(s) => { setVoxelSize(s); engineRef.current?.setVoxelSize(s); }}
         onDeleteSelected={() => engineRef.current?.deleteSelected()}

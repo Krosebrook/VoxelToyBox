@@ -90,6 +90,7 @@ export interface SavedModel {
   data: VoxelData[];
   baseModel?: string;
   timestamp?: number;
+  thumbnail?: string; // Base64 image data
 }
 
 /** Source metadata from search grounding. */

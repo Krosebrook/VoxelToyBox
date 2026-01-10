@@ -227,6 +227,18 @@ export class VoxelEngine {
     Sound.play('place');
   }
 
+  public setSelectionMaterial(material: VoxelMaterial) {
+    if (this.selectedVoxelIds.size === 0) return;
+    this.pushHistory();
+    this.voxels.forEach(v => {
+        if (this.selectedVoxelIds.has(v.id)) {
+            v.material = material;
+        }
+    });
+    this.rebuildInstanceMeshes();
+    Sound.play('paint');
+  }
+
   public clearSelection() {
     this.selectedVoxelIds.clear();
     this.onSelectionChange?.(0);
