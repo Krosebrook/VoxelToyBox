@@ -10,6 +10,13 @@ import { AppState, AppMode, SimulationVoxel, RebuildTarget, VoxelData, BuildTool
 import { CONFIG } from '../utils/voxelConstants';
 import { Sound } from './SoundService';
 
+type SelectionAction = 
+  | { type: 'SELECTION', prev: Set<number>, next: Set<number> }
+  | { type: 'TRANSFORM', prev: Map<number, THREE.Vector3>, next: Map<number, THREE.Vector3> }
+  | { type: 'DELETE', voxels: SimulationVoxel[] }
+  | { type: 'COPY', createdVoxels: SimulationVoxel[] }
+  | { type: 'MATERIAL', prev: Map<number, VoxelMaterial>, next: Map<number, VoxelMaterial> };
+
 /**
  * VoxelEngine handles the heavy lifting of 3D rendering, physics simulation,
  * and user interactions using Three.js and InstancedMeshes.
@@ -36,6 +43,7 @@ export class VoxelEngine {
   private selectionMesh: THREE.Mesh;
   private selectionStartPoint: THREE.Vector3 | null = null;
   private isSelecting: boolean = false;
+  private isAddingSelection: boolean = false; // Track shift key state
   private selectedVoxelIds: Set<number> = new Set();
   
   // Persistent selection outline (Multiple voxels)
@@ -44,9 +52,14 @@ export class VoxelEngine {
   private voxelSize: number = CONFIG.VOXEL_SIZE;
   private voxels: SimulationVoxel[] = [];
   
+  // Global History
   private undoStack: VoxelData[][] = [];
   private redoStack: VoxelData[][] = [];
   private maxHistory = 50;
+
+  // Selection Specific History
+  private selectionUndoStack: SelectionAction[] = [];
+  private selectionRedoStack: SelectionAction[] = [];
 
   private rebuildTargets: RebuildTarget[] = [];
   private rebuildStartTime: number = 0;
@@ -63,6 +76,7 @@ export class VoxelEngine {
   private onColorPick: (color: number, material: VoxelMaterial) => void;
   private onSelectionChange?: (count: number) => void;
   private onHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
+  private onSelectionHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
   private animationId: number = 0;
 
   constructor(
@@ -71,7 +85,8 @@ export class VoxelEngine {
     onCountChange: (count: number) => void,
     onColorPick: (color: number, material: VoxelMaterial) => void,
     onHistoryChange?: (canUndo: boolean, canRedo: boolean) => void,
-    onSelectionChange?: (count: number) => void
+    onSelectionChange?: (count: number) => void,
+    onSelectionHistoryChange?: (canUndo: boolean, canRedo: boolean) => void
   ) {
     this.container = container;
     this.onStateChange = onStateChange;
@@ -79,6 +94,7 @@ export class VoxelEngine {
     this.onColorPick = onColorPick;
     this.onHistoryChange = onHistoryChange;
     this.onSelectionChange = onSelectionChange;
+    this.onSelectionHistoryChange = onSelectionHistoryChange;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(CONFIG.BG_COLOR);
@@ -188,21 +204,128 @@ export class VoxelEngine {
       return dataUrl;
   }
 
+  // --- Selection History Management ---
+
+  private pushSelectionHistory(action: SelectionAction) {
+    this.selectionUndoStack.push(action);
+    this.selectionRedoStack = [];
+    this.notifySelectionHistory();
+  }
+
+  private notifySelectionHistory() {
+    this.onSelectionHistoryChange?.(this.selectionUndoStack.length > 0, this.selectionRedoStack.length > 0);
+  }
+
+  public undoSelection() {
+    const action = this.selectionUndoStack.pop();
+    if (!action) return;
+
+    this.selectionRedoStack.push(action);
+
+    switch(action.type) {
+      case 'SELECTION':
+        this.selectedVoxelIds = new Set(action.prev);
+        break;
+      case 'TRANSFORM':
+        this.voxels.forEach(v => {
+          if (action.prev.has(v.id)) {
+            const pos = action.prev.get(v.id)!;
+            v.x = pos.x; v.y = pos.y; v.z = pos.z;
+          }
+        });
+        break;
+      case 'DELETE':
+        this.voxels.push(...action.voxels);
+        action.voxels.forEach(v => this.selectedVoxelIds.add(v.id)); // Restore selection of deleted items
+        break;
+      case 'COPY':
+        const createdIds = new Set(action.createdVoxels.map(v => v.id));
+        this.voxels = this.voxels.filter(v => !createdIds.has(v.id));
+        this.selectedVoxelIds = new Set(); // Clear selection as copies are gone
+        break;
+      case 'MATERIAL':
+        this.voxels.forEach(v => {
+          if (action.prev.has(v.id)) {
+            v.material = action.prev.get(v.id)!;
+          }
+        });
+        break;
+    }
+
+    this.rebuildInstanceMeshes();
+    this.onCountChange(this.voxels.length);
+    this.onSelectionChange?.(this.selectedVoxelIds.size);
+    this.notifySelectionHistory();
+    Sound.play('undo');
+  }
+
+  public redoSelection() {
+    const action = this.selectionRedoStack.pop();
+    if (!action) return;
+
+    this.selectionUndoStack.push(action);
+
+    switch(action.type) {
+      case 'SELECTION':
+        this.selectedVoxelIds = new Set(action.next);
+        break;
+      case 'TRANSFORM':
+        this.voxels.forEach(v => {
+          if (action.next.has(v.id)) {
+            const pos = action.next.get(v.id)!;
+            v.x = pos.x; v.y = pos.y; v.z = pos.z;
+          }
+        });
+        break;
+      case 'DELETE':
+        const idsToDelete = new Set(action.voxels.map(v => v.id));
+        this.voxels = this.voxels.filter(v => !idsToDelete.has(v.id));
+        this.clearSelection();
+        break;
+      case 'COPY':
+        this.voxels.push(...action.createdVoxels);
+        this.clearSelection();
+        action.createdVoxels.forEach(v => this.selectedVoxelIds.add(v.id));
+        break;
+      case 'MATERIAL':
+        this.voxels.forEach(v => {
+            if (action.next.has(v.id)) {
+              v.material = action.next.get(v.id)!;
+            }
+          });
+        break;
+    }
+
+    this.rebuildInstanceMeshes();
+    this.onCountChange(this.voxels.length);
+    this.onSelectionChange?.(this.selectedVoxelIds.size);
+    this.notifySelectionHistory();
+    Sound.play('redo');
+  }
+
   // --- Group Manipulation Methods ---
 
   public deleteSelected() {
     if (this.selectedVoxelIds.size === 0) return;
-    this.pushHistory();
+    this.pushHistory(); // Main history
+    
+    // Capture for Selection History
+    const deletedVoxels = this.voxels.filter(v => this.selectedVoxelIds.has(v.id));
+    this.pushSelectionHistory({
+      type: 'DELETE',
+      voxels: JSON.parse(JSON.stringify(deletedVoxels)) // Deep copy
+    });
+
     this.voxels = this.voxels.filter(v => !this.selectedVoxelIds.has(v.id));
-    this.clearSelection();
-    this.rebuildInstanceMeshes();
+    this.clearSelection(); // This calls rebuildInstanceMeshes
     this.onCountChange(this.voxels.length);
     Sound.play('break');
   }
 
   public copySelected() {
     if (this.selectedVoxelIds.size === 0) return;
-    this.pushHistory();
+    this.pushHistory(); // Main history
+
     const selected = this.voxels.filter(v => this.selectedVoxelIds.has(v.id));
     const copies = selected.map(v => ({
         ...v,
@@ -210,19 +333,56 @@ export class VoxelEngine {
         x: v.x + 1 // Offset to show it was copied
     }));
     this.voxels.push(...copies);
+
+    // Capture for Selection History
+    this.pushSelectionHistory({
+      type: 'COPY',
+      createdVoxels: JSON.parse(JSON.stringify(copies))
+    });
+
+    // Select the new copies
+    this.selectedVoxelIds.clear();
+    copies.forEach(c => this.selectedVoxelIds.add(c.id));
+
     this.rebuildInstanceMeshes();
     this.onCountChange(this.voxels.length);
+    this.onSelectionChange?.(this.selectedVoxelIds.size);
     Sound.play('place');
   }
 
   public moveSelected(axis: 'x' | 'y' | 'z', dir: number) {
     if (this.selectedVoxelIds.size === 0) return;
-    this.pushHistory();
+    this.pushHistory(); // Main History
+
+    // Capture state before move
+    const prevPositions = new Map<number, THREE.Vector3>();
+    this.voxels.forEach(v => {
+      if (this.selectedVoxelIds.has(v.id)) {
+        prevPositions.set(v.id, new THREE.Vector3(v.x, v.y, v.z));
+      }
+    });
+
+    // Perform move
     this.voxels.forEach(v => {
         if (this.selectedVoxelIds.has(v.id)) {
             v[axis] += dir;
         }
     });
+
+    // Capture state after move
+    const nextPositions = new Map<number, THREE.Vector3>();
+    this.voxels.forEach(v => {
+      if (this.selectedVoxelIds.has(v.id)) {
+        nextPositions.set(v.id, new THREE.Vector3(v.x, v.y, v.z));
+      }
+    });
+
+    this.pushSelectionHistory({
+      type: 'TRANSFORM',
+      prev: prevPositions,
+      next: nextPositions
+    });
+
     this.rebuildInstanceMeshes();
     Sound.play('place');
   }
@@ -230,16 +390,39 @@ export class VoxelEngine {
   public setSelectionMaterial(material: VoxelMaterial) {
     if (this.selectedVoxelIds.size === 0) return;
     this.pushHistory();
+
+    const prev = new Map<number, VoxelMaterial>();
+    const next = new Map<number, VoxelMaterial>();
+
     this.voxels.forEach(v => {
         if (this.selectedVoxelIds.has(v.id)) {
+            prev.set(v.id, v.material);
             v.material = material;
+            next.set(v.id, material);
         }
     });
+
+    this.pushSelectionHistory({
+      type: 'MATERIAL',
+      prev,
+      next
+    });
+
     this.rebuildInstanceMeshes();
     Sound.play('paint');
   }
 
   public clearSelection() {
+    // If we are clearing a non-empty selection, maybe track it?
+    // Usually clicking away clears. We might want to undo that.
+    if (this.selectedVoxelIds.size > 0) {
+       this.pushSelectionHistory({
+         type: 'SELECTION',
+         prev: new Set(this.selectedVoxelIds),
+         next: new Set()
+       });
+    }
+
     this.selectedVoxelIds.clear();
     this.onSelectionChange?.(0);
     this.rebuildInstanceMeshes();
@@ -323,8 +506,12 @@ export class VoxelEngine {
           if (intersects.length > 0) {
               this.selectionStartPoint = intersects[0].point.clone();
               this.isSelecting = true;
+              this.isAddingSelection = event.shiftKey; // Check for shift key
               this.controls.enabled = false;
-              this.clearSelection();
+              
+              if (!this.isAddingSelection) {
+                this.clearSelection();
+              }
           }
           return;
       }
@@ -432,12 +619,36 @@ export class VoxelEngine {
 
   private finishSelection() {
       const box = new THREE.Box3().setFromObject(this.selectionMesh);
-      this.selectedVoxelIds.clear();
+      const prevIds = new Set(this.selectedVoxelIds);
+      
+      // If NOT adding (normal drag), we already cleared selection in onMouseDown
+      // But we tracked it in prevIds before onMouseDown if we were clever, 
+      // but actually onMouseDown cleared it. 
+      // To properly undo "Clear + Select New", we would need to know what was cleared.
+      // However, simplified logic: `selectedVoxelIds` currently contains what we want IF isAddingSelection is true.
+      // If isAddingSelection is false, selectedVoxelIds is empty.
+      
       this.voxels.forEach(v => {
           if (box.containsPoint(new THREE.Vector3(v.x, v.y, v.z))) {
               this.selectedVoxelIds.add(v.id);
           }
       });
+      
+      // Only push history if selection actually changed
+      let changed = false;
+      if (this.selectedVoxelIds.size !== prevIds.size) changed = true;
+      else {
+          for (const id of this.selectedVoxelIds) if (!prevIds.has(id)) changed = true;
+      }
+      
+      if (changed) {
+          this.pushSelectionHistory({
+              type: 'SELECTION',
+              prev: prevIds,
+              next: new Set(this.selectedVoxelIds)
+          });
+      }
+
       this.onSelectionChange?.(this.selectedVoxelIds.size);
       this.rebuildInstanceMeshes();
       if (this.selectedVoxelIds.size > 0) Sound.play('ui');
@@ -572,20 +783,35 @@ export class VoxelEngine {
       if (this.undoStack.length === 0) return; 
       this.redoStack.push(this.getVoxelData()); 
       this.loadSnapshot(this.undoStack.pop()!); 
+      
+      // Clear selection history on global undo to prevent state mismatch
+      this.selectionUndoStack = [];
+      this.selectionRedoStack = [];
+      this.notifySelectionHistory();
+      
       Sound.play('undo');
   }
   public redo() { 
       if (this.redoStack.length === 0) return; 
       this.undoStack.push(this.getVoxelData()); 
       this.loadSnapshot(this.redoStack.pop()!); 
+      
+      // Clear selection history on global redo
+      this.selectionUndoStack = [];
+      this.selectionRedoStack = [];
+      this.notifySelectionHistory();
+
       Sound.play('redo');
   }
 
   private loadSnapshot(data: VoxelData[]) {
     this.voxels = data.map((v, i) => ({
-        id: i, x: v.x, y: v.y, z: v.z, color: new THREE.Color(v.color), material: v.material ?? 0,
+        id: i, // Reset IDs on global load
+        x: v.x, y: v.y, z: v.z, color: new THREE.Color(v.color), material: v.material ?? 0,
         vx: 0, vy: 0, vz: 0, rx: 0, ry: 0, rz: 0, rvx: 0, rvy: 0, rvz: 0
     }));
+    this.selectedVoxelIds.clear(); // Clear selection on global load
+    this.onSelectionChange?.(0);
     this.rebuildInstanceMeshes();
     this.onCountChange(this.voxels.length);
     this.state = AppState.STABLE;
@@ -656,6 +882,8 @@ export class VoxelEngine {
   public loadInitialModel(data: VoxelData[]) {
     this.undoStack = []; this.redoStack = [];
     this.voxels = data.map((v, i) => ({ id: i, x: v.x, y: v.y, z: v.z, color: new THREE.Color(v.color), material: v.material ?? 0, vx: 0, vy: 0, vz: 0, rx: 0, ry: 0, rz: 0, rvx: 0, rvy: 0, rvz: 0 }));
+    this.selectedVoxelIds.clear();
+    this.selectionUndoStack = []; this.selectionRedoStack = [];
     this.rebuildInstanceMeshes();
     this.onCountChange(this.voxels.length);
     this.state = AppState.STABLE; this.onStateChange(this.state);

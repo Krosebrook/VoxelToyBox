@@ -1,27 +1,32 @@
+
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
 */
 
 
-import React, { useState, useEffect } from 'react';
-import { Sparkles, X, Loader2, Wand2, Hammer } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Sparkles, X, Loader2, Wand2, Hammer, Image as ImageIcon, Trash2 } from 'lucide-react';
+import { fileToBase64, processImageForAi } from '../utils/imageHelpers';
 
 interface PromptModalProps {
   isOpen: boolean;
   mode: 'create' | 'morph';
   onClose: () => void;
-  onSubmit: (prompt: string) => Promise<void>;
+  onSubmit: (prompt: string, image?: string) => Promise<void>;
 }
 
 export const PromptModal: React.FC<PromptModalProps> = ({ isOpen, mode, onClose, onSubmit }) => {
   const [prompt, setPrompt] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+  const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (isOpen) {
       setPrompt('');
+      setSelectedImage(null);
       setError('');
       setIsLoading(false);
     }
@@ -31,14 +36,15 @@ export const PromptModal: React.FC<PromptModalProps> = ({ isOpen, mode, onClose,
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (!prompt.trim() || isLoading) return;
+    if ((!prompt.trim() && !selectedImage) || isLoading) return;
     
     setIsLoading(true);
     setError('');
     
     try {
-      await onSubmit(prompt);
+      await onSubmit(prompt, selectedImage || undefined);
       setPrompt('');
+      setSelectedImage(null);
       onClose();
     } catch (err) {
       console.error(err);
@@ -48,13 +54,25 @@ export const PromptModal: React.FC<PromptModalProps> = ({ isOpen, mode, onClose,
     }
   };
 
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      try {
+        const rawBase64 = await fileToBase64(e.target.files[0]);
+        const optimized = await processImageForAi(rawBase64);
+        setSelectedImage(optimized);
+      } catch (err) {
+        setError('Failed to process image');
+      }
+    }
+  };
+
   const isCreate = mode === 'create';
-  // Changed from fuchsia to sky/blue
   const themeColor = isCreate ? 'sky' : 'amber';
   const themeBg = isCreate ? 'bg-sky-500' : 'bg-amber-500';
   const themeHover = isCreate ? 'hover:bg-sky-600' : 'hover:bg-amber-600';
   const themeLight = isCreate ? 'bg-sky-100' : 'bg-amber-100';
   const themeText = isCreate ? 'text-sky-600' : 'text-amber-600';
+  const themeBorderFocus = isCreate ? 'focus:border-sky-400 focus:ring-sky-100' : 'focus:border-amber-400 focus:ring-amber-100';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 font-sans">
@@ -88,21 +106,37 @@ export const PromptModal: React.FC<PromptModalProps> = ({ isOpen, mode, onClose,
         <div className="p-6 bg-white">
           <p className="text-slate-600 font-semibold mb-4">
             {isCreate 
-                ? "What new creation should we build?" 
-                : "How should we rebuild the current voxels?"}
+                ? "Describe what to build or upload an image for inspiration." 
+                : "Describe how to change it or add an image reference."}
           </p>
           
           <form onSubmit={handleSubmit}>
-            <textarea 
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder={isCreate 
-                ? "e.g., A medieval castle, a giant robot, a fruit basket..." 
-                : "e.g., Turn it into a car, make a pyramid, build a smiley face..."}
-              disabled={isLoading}
-              className={`w-full h-32 resize-none bg-slate-50 border-2 border-slate-200 rounded-xl p-4 font-medium text-slate-700 focus:outline-none focus:ring-4 transition-all placeholder:text-slate-400 mb-4 ${isCreate ? 'focus:border-sky-400 focus:ring-sky-100' : 'focus:border-amber-400 focus:ring-amber-100'}`}
-              autoFocus
-            />
+            <div className="relative mb-4">
+                <textarea 
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  placeholder={isCreate 
+                    ? "e.g., A medieval castle, a giant robot..." 
+                    : "e.g., Turn it into a car, make a pyramid..."}
+                  disabled={isLoading}
+                  className={`w-full h-32 resize-none bg-slate-50 border-2 border-slate-200 rounded-xl p-4 font-medium text-slate-700 focus:outline-none focus:ring-4 transition-all placeholder:text-slate-400 ${themeBorderFocus}`}
+                  autoFocus
+                />
+                
+                {/* Image Preview Overlay */}
+                {selectedImage && (
+                    <div className="absolute bottom-3 left-3 bg-white p-1 rounded-lg border border-slate-200 shadow-sm flex items-center gap-2 animate-in fade-in zoom-in duration-200">
+                        <img src={selectedImage} alt="Reference" className="h-10 w-10 object-cover rounded-md" />
+                        <button 
+                            type="button" 
+                            onClick={() => setSelectedImage(null)}
+                            className="p-1 hover:bg-rose-100 text-slate-400 hover:text-rose-500 rounded-md transition-colors"
+                        >
+                            <Trash2 size={14} />
+                        </button>
+                    </div>
+                )}
+            </div>
 
             {error && (
               <div className="mb-4 p-3 rounded-xl bg-rose-50 text-rose-600 text-sm font-bold flex items-center gap-2">
@@ -110,10 +144,28 @@ export const PromptModal: React.FC<PromptModalProps> = ({ isOpen, mode, onClose,
               </div>
             )}
 
-            <div className="flex justify-end">
+            <div className="flex justify-between items-center">
+              <input 
+                type="file" 
+                ref={fileInputRef} 
+                onChange={handleFileSelect} 
+                accept="image/*" 
+                className="hidden" 
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isLoading}
+                className="flex items-center gap-2 px-4 py-3 rounded-xl font-bold text-slate-500 hover:bg-slate-100 text-sm transition-all"
+                title="Attach Image Reference"
+              >
+                <ImageIcon size={18} />
+                <span className="hidden sm:inline">Add Image</span>
+              </button>
+
               <button 
                 type="submit"
-                disabled={!prompt.trim() || isLoading}
+                disabled={(!prompt.trim() && !selectedImage) || isLoading}
                 className={`
                   flex items-center gap-2 px-6 py-3 rounded-xl font-bold text-white text-sm transition-all
                   ${isLoading 

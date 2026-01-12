@@ -65,6 +65,8 @@ const App: React.FC = () => {
   // History Tracking
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
+  const [canUndoSelection, setCanUndoSelection] = useState(false);
+  const [canRedoSelection, setCanRedoSelection] = useState(false);
 
   // Content state
   const [currentBaseModel, setCurrentBaseModel] = useState<string>('Eagle');
@@ -185,7 +187,8 @@ const App: React.FC = () => {
           engineRef.current?.setBuildProps(color, mat);
       },
       (u, r) => { setCanUndo(u); setCanRedo(r); },
-      (selected) => setSelectedCount(selected)
+      (selected) => setSelectedCount(selected),
+      (su, sr) => { setCanUndoSelection(su); setCanRedoSelection(sr); }
     );
 
     engineRef.current = engine;
@@ -288,6 +291,21 @@ const App: React.FC = () => {
     }
   };
 
+  const handleLoadRecentBuild = () => {
+    if (customBuilds.length === 0) {
+      alert("No saved builds found.");
+      return;
+    }
+    // Find the one with highest timestamp
+    const recent = [...customBuilds].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0];
+    
+    if (recent) {
+        engineRef.current?.loadInitialModel(recent.data);
+        setCurrentBaseModel(recent.name);
+        Sound.play('ui');
+    }
+  };
+
   const handleExportObj = () => {
     if (!engineRef.current) return;
     const data = engineRef.current.getVoxelData();
@@ -325,7 +343,7 @@ const App: React.FC = () => {
     }
   };
 
-  const handlePromptSubmit = async (prompt: string) => {
+  const handlePromptSubmit = async (prompt: string, imageBase64?: string) => {
     // Ensure API Key selection if not already marked as present
     if (!hasApiKey && window.aistudio?.hasSelectedApiKey) {
         const selected = await window.aistudio.hasSelectedApiKey();
@@ -352,10 +370,33 @@ Rules:
 - Be creative and detailed.
 - Use materials effectively (e.g., metal for machine parts, glow for eyes).
 - Focus on clear, iconic silhouettes.`;
+        
+        // Construct content payload for multimodal support
+        let contents: any;
+        
+        if (imageBase64) {
+            // Remove data URL scheme if present to get pure base64
+            const base64Data = imageBase64.split(',')[1] || imageBase64;
+            contents = {
+                parts: [
+                    {
+                        inlineData: {
+                            mimeType: "image/jpeg",
+                            data: base64Data
+                        }
+                    },
+                    {
+                        text: prompt || "Analyze this image and create a 3D voxel representation of its main subject."
+                    }
+                ]
+            };
+        } else {
+            contents = prompt;
+        }
 
         const response = await ai.models.generateContent({
             model: 'gemini-3-pro-preview',
-            contents: prompt,
+            contents: contents,
             config: {
                 systemInstruction,
                 tools: [{ googleSearch: {} }],
@@ -405,6 +446,8 @@ Rules:
                 material: v.material ?? VoxelMaterial.MATTE
             }));
             
+            const modelName = prompt || (imageBase64 ? "Image Build" : "AI Build");
+
             // Create thumbnail for AI generated content if in 'create' mode
             if (promptMode === 'create') {
                 engineRef.current?.loadInitialModel(data);
@@ -413,8 +456,8 @@ Rules:
                     const snapshot = engineRef.current?.takeSnapshot();
                     if (snapshot) {
                         const thumbnail = await resizeThumbnail(snapshot);
-                        setCustomBuilds(p => [...p, { name: prompt, data, timestamp: Date.now(), thumbnail }]);
-                        setCurrentBaseModel(prompt);
+                        setCustomBuilds(p => [...p, { name: modelName, data, timestamp: Date.now(), thumbnail }]);
+                        setCurrentBaseModel(modelName);
                         performAutoSave();
                     }
                 });
@@ -425,7 +468,7 @@ Rules:
                 } else {
                     engineRef.current?.rebuild(data);
                 }
-                setCustomRebuilds(p => [...p, { name: prompt, data, baseModel: currentBaseModel, timestamp: Date.now() }]);
+                setCustomRebuilds(p => [...p, { name: modelName, data, baseModel: currentBaseModel, timestamp: Date.now() }]);
             }
         }
     } catch (err: any) { 
@@ -462,9 +505,13 @@ Rules:
         customPalette={customPalette}
         selectedCount={selectedCount}
         isAutoRotate={isAutoRotate} isInfoVisible={showWelcome} isGenerating={isGenerating}
-        groundingSources={groundingSources} canUndo={canUndo} canRedo={canRedo} lastSaveTime={lastSaveTime}
+        groundingSources={groundingSources} 
+        canUndo={canUndo} canRedo={canRedo} 
+        canUndoSelection={canUndoSelection} canRedoSelection={canRedoSelection}
+        lastSaveTime={lastSaveTime}
         isMirrorMode={isMirrorMode} isMuted={isMuted}
         onUndo={() => engineRef.current?.undo()} onRedo={() => engineRef.current?.redo()}
+        onUndoSelection={() => engineRef.current?.undoSelection()} onRedoSelection={() => engineRef.current?.redoSelection()}
         onSnapshot={() => {
             const link = document.createElement('a');
             link.download = `voxel-${Date.now()}.png`; link.href = engineRef.current?.takeSnapshot() || '';
@@ -480,6 +527,7 @@ Rules:
         onSaveCurrent={handleSaveCurrent}
         onSaveAs={handleSaveAs}
         onLoadLatest={handleLoadLatest}
+        onLoadRecentBuild={handleLoadRecentBuild}
         onExportObj={handleExportObj}
         onSaveColor={handleSaveColor}
         onDeleteColor={handleDeleteColor}
